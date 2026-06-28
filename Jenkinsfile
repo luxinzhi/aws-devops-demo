@@ -62,18 +62,6 @@ pipeline {
             }
         }
 
-        stage('Wait Green Ready') {
-            steps {
-                sh '''
-                    kubectl wait \
-                      --for=condition=Ready \
-                      pod \
-                      -l app=green \
-                      --timeout=180s
-                '''
-            }
-        }
-
         stage('Health Check') {
             steps {
                 sh """
