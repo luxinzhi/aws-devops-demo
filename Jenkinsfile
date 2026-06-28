@@ -1,103 +1,240 @@
 pipeline {
+
     agent any
 
     environment {
-        AWS_REGION = 'us-east-1'
-        ECR_REPO   = '269523617138.dkr.ecr.us-east-1.amazonaws.com/demo-app'
+
+        AWS_REGION = "us-east-1"
+        CLUSTER_NAME = "demo-eks"
+
+        ECR_REPO = "269523617138.dkr.ecr.us-east-1.amazonaws.com/demo-app"
+
+        IMAGE_TAG = "${BUILD_NUMBER}"
     }
 
     stages {
+
         stage('Checkout') {
             steps {
                 checkout scm
-                // Refresh EKS credential once at the beginning
-                sh "aws eks update-kubeconfig --name demo-eks --region ${AWS_REGION}"
             }
         }
 
-        stage('Build Image') {
+        stage('Prepare Kubernetes') {
             steps {
+
                 sh """
-                docker build -t demo-app:${BUILD_NUMBER} app/
+                    aws eks update-kubeconfig \
+                    --region ${AWS_REGION} \
+                    --name ${CLUSTER_NAME}
+
+                    kubectl get nodes
                 """
+
             }
         }
 
-        stage('Push ECR') {
+        stage('Build Docker Image') {
+
             steps {
+
                 sh """
-                aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPO}
-                docker tag demo-app:${BUILD_NUMBER} ${ECR_REPO}:${BUILD_NUMBER}
-                docker push ${ECR_REPO}:${BUILD_NUMBER}
+
+                    docker build \
+                    -t demo-app:${IMAGE_TAG} \
+                    app/
+
                 """
+
             }
+
+        }
+
+        stage('Login ECR & Push Image') {
+
+            steps {
+
+                sh """
+
+                aws ecr get-login-password \
+                --region ${AWS_REGION} \
+                | docker login \
+                --username AWS \
+                --password-stdin ${ECR_REPO}
+
+                docker tag demo-app:${IMAGE_TAG} ${ECR_REPO}:${IMAGE_TAG}
+
+                docker push ${ECR_REPO}:${IMAGE_TAG}
+
+                """
+
+            }
+
         }
 
         stage('Deploy Green') {
 
             steps {
-                sh """
-                sed -i 's/IMAGE_TAG/${BUILD_NUMBER}/g' \
-                k8s/green.yaml
-                kubectl apply -f k8s/green.yaml
 
-                kubectl rollout status \
-                deployment/demo-green \
-                --timeout=300s
+                sh """
+
+                cp k8s/green.yaml /tmp/green.yaml
+
+                sed -i 's/IMAGE_TAG/${IMAGE_TAG}/g' /tmp/green.yaml
+
+                kubectl apply -f /tmp/green.yaml
+
+                kubectl rollout status deployment/demo-green --timeout=300s
+
                 """
+
             }
+
+        }
+
+        stage('Wait Green Ready') {
+
+            steps {
+
+                sh """
+
+                kubectl wait \
+                --for=condition=Ready \
+                pod \
+                -l app=green \
+                --timeout=180s
+
+                """
+
+            }
+
         }
 
         stage('Health Check') {
+
             steps {
+
                 sh """
-                # Get pod name labeled app=green
-                GREEN_POD=\$(kubectl get pod -l app=green -o jsonpath='{.items[0].metadata.name}')
-                # Health probe test inside green pod
-                kubectl exec \$GREEN_POD -- curl -f http://localhost/
-                echo "Green version health check passed"
+
+                GREEN_POD=$(kubectl get pod \
+                -l app=green \
+                -o jsonpath='{.items[0].metadata.name}')
+
+                kubectl exec $GREEN_POD -- wget -qO- http://localhost/
+
+                echo "Green version health check passed."
+
                 """
+
             }
+
         }
 
         stage('Manual Approval') {
+
             steps {
+
                 timeout(time: 5, unit: 'MINUTES') {
+
                     input(
-                        message: "Green version health check passed. Confirm switching traffic to Green?",
-                        ok: "Confirm Switch"
+
+                        message: "Green deployment succeeded. Switch traffic to Green?",
+
+                        ok: "Switch"
+
                     )
+
                 }
+
             }
+
         }
 
         stage('Switch Traffic') {
+
             steps {
+
                 sh """
-                # Modify service selector to route traffic to green deployment
-                kubectl patch svc demo-service -p '{"spec":{"selector":{"app":"green"}}}'
+
+                kubectl patch svc demo-service \
+                -p '{"spec":{"selector":{"app":"green"}}}'
+
+                sleep 15
+
                 """
+
             }
+
         }
 
-        stage('Verify') {
+        stage('Verify Service') {
+
             steps {
+
                 sh """
-                sleep 20
+
                 kubectl get svc demo-service
-                echo "Traffic switched to Green successfully"
+
+                kubectl get endpoints demo-service
+
+                kubectl get pods -o wide
+
+                echo "Traffic switched successfully."
+
                 """
+
             }
+
         }
+
     }
 
     post {
-        failure {
-            echo 'Deploy Failed. Rollback To Blue.'
-            sh """
-            # Roll back traffic to old blue version if any error occurs
-            kubectl patch svc demo-service -p '{"spec":{"selector":{"app":"blue"}}}' || true
-            """
+
+        success {
+
+            echo "Deployment completed successfully."
+
         }
+
+        failure {
+
+            echo "Deployment failed."
+
+            sh """
+
+            kubectl patch svc demo-service \
+            -p '{"spec":{"selector":{"app":"blue"}}}' || true
+
+            """
+
+        }
+
+        aborted {
+
+            echo "Deployment aborted."
+
+            sh """
+
+            kubectl patch svc demo-service \
+            -p '{"spec":{"selector":{"app":"blue"}}}' || true
+
+            """
+
+        }
+
+        always {
+
+            sh """
+
+            docker image prune -af || true
+
+            docker container prune -f || true
+
+            """
+
+        }
+
     }
+
 }
