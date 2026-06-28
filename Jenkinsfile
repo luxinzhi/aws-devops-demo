@@ -76,17 +76,12 @@ pipeline {
 
         stage('Health Check') {
             steps {
-                sh '''
-                    GREEN_POD=$(kubectl get pod \
-                      -l app=green \
-                      -o jsonpath='{.items[0].metadata.name}')
-
-                    echo "Green Pod: ${GREEN_POD}"
-
-                    kubectl exec ${GREEN_POD} -- wget -qO- http://localhost/
-
-                    echo "Health Check Passed."
-                '''
+                sh """
+                GREEN_POD=\$(kubectl get pod -l app=green -o jsonpath='{.items[0].metadata.name}')
+                echo "Green Pod: \$GREEN_POD"
+                kubectl exec \$GREEN_POD -- curl -f http://localhost/
+                echo "Green version health check passed"
+                """
             }
         }
 
